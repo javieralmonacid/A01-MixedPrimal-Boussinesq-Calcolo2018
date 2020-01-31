@@ -126,6 +126,7 @@ for (int n=0; n<nref; n++){
 	func k11 = exp(x+y); 	// Thermal Conductivity Tensor
 	func k12 = 0.0;
 	func k22 = exp(x+y);
+	
 	/*--------------------------------------------
 		Exact solutions and source terms
 	---------------------------------------------*/
