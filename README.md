@@ -4,6 +4,7 @@ Modelling Natural Convection with FreeFem++
 Natural convection is a heat transfer process that is present in our everyday life: from the cooling of little electronic devices, to indoor climate systems, to environmental transport problems. In this set of codes, a finite element method is implemented for the solution of the equations of conservation of mass, momentum and energy, coupled by the boussinesq approximation.
 
 ## Main Characteristics
+
 * The method can handle a temperature-dependent viscosity and a tensorial,
 space-dependent thermal conductivity.
 
@@ -35,7 +36,7 @@ This requires to load "Element_Mixte" and "Element_PkEdge".
 
 ## Reference article
 
-The theory behind this method can be found in the article
+To find out more about the theoretical aspects of this method, as well as comparisons between the codes in this repository and their expected results, read
 
 > J. A. Almonacid, G. N. Gatica and R. Oyarzua, 
 > [*A mixed-primal finite element method for the Boussinesq problem with temperature-dependent viscosity*](https://rdcu.be/32pk). 
