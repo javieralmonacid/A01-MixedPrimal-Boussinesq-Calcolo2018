@@ -1,0 +1,628 @@
+/*
+	NATURAL CONVECTION OF A FLUID INSIDE A CAVITY
+	SOLUTION USING THE FINITE ELEMENT RT0-P1-P0-P1-P0
+
+	Author: 
+		Javier Almonacid
+		Research Assistant
+		Center for Research in Mathematical Engineering (CI2MA)
+		Universidad de Concepcion
+		Date: August 27, 2018
+
+	Article:
+		J.A. Almonacid, G.N. Gatica and R. Oyarzua,
+		"A mixed-primal finite element method for the Boussinesq 
+		problem with temperature-dependent viscosity". 
+		Calcolo 55 (2018), no. 3, Art. 36, 42 pp.
+*/
+
+load "MUMPS";
+// Run as'ff-mpirun -np 1 natural_convection_cavity.edp'
+load "iovtk";
+
+string filename = "natural_convection_cavity.m";
+
+int nref = 6;
+
+real[int] errorL2s(nref); real[int] errorDivs(nref); real[int] errorHdivs(nref);
+real[int] errorL2u(nref); real[int] errorGradu(nref); real[int] errorH1u(nref);
+real[int] errorL2g(nref);
+real[int] errorL2phi(nref); real[int] errorGradphi(nref); real[int] errorH1phi(nref);
+real[int] errorL2lam(nref);
+real[int] errorL2pre(nref);
+real[int] errortotal(nref);
+
+real[int] rates(nref); rates[0] = 0.; 
+real[int] rateu(nref); rateu[0] = 0.;
+real[int] rateg(nref); rateg[0] = 0.;
+real[int] ratephi(nref); ratephi[0] = 0.;
+real[int] ratelam(nref); ratelam[0] = 0.;
+real[int] ratepre(nref); ratepre[0] = 0.;
+
+real[int] DOF(nref);
+real[int] hmesh(nref);
+real[int] hbord(nref);
+real[int] iterations(nref);
+
+// Uncomment to export data into a .m file
+{ 
+ofstream f(filename);
+f << "data.DOF = zeros(" << 1 << "," << nref << ");\n";
+f << "data.hmesh = zeros(" << 1 << "," << nref << ");\n";
+f << "data.hbord = zeros(" << 1 << "," << nref << ");\n";
+f << "data.errorHdivs = zeros(" << 1 << "," << nref << ");\n";
+f << "data.errorH1u = zeros(" << 1 << "," << nref << ");\n";
+f << "data.errorL2g = zeros(" << 1 << "," << nref << ");\n";
+f << "data.errorH1phi = zeros(" << 1 << "," << nref << ");\n";
+f << "data.errorL2lam = zeros(" << 1 << "," << nref << ");\n";
+f << "data.errorL2pre = zeros(" << 1 << "," << nref << ");\n";
+f << "data.rates = zeros(" << 1 << "," << nref << ");\n";
+f << "data.rateu = zeros(" << 1 << "," << nref << ");\n";
+f << "data.rateg = zeros(" << 1 << "," << nref << ");\n";
+f << "data.ratephi = zeros(" << 1 << "," << nref << ");\n";
+f << "data.ratelam = zeros(" << 1 << "," << nref << ");\n";
+f << "data.ratepre = zeros(" << 1 << "," << nref << ");\n";
+f << "data.iterations = zeros(" << 1 << "," << nref << ");\n";
+}
+
+
+/*--------------------------
+	GEOMETRY
+---------------------------*/
+//
+//           1
+//     -------------
+//     |            |
+//     |            |
+//    3|            |4
+//     |            |
+//     |            |
+//     -------------
+//           2
+border bb(t=0,1){x=t; y=0.; label=2;};
+border br(t=0,1){x=1.; y=t; label=4;};
+border bt(t=1,0){x=t; y=1.; label=1;};
+border bl(t=1,0){x=0.; y=t; label=3;};
+
+int size1 = 2^(nref+3);
+int size1t = size1/2;
+
+mesh Th1 = buildmesh(bb(size1)+br(size1)+bt(size1)+bl(size1));
+mesh Sh1;
+{
+	mesh Sh1aux = buildmesh(bb(size1t)+br(size1t)+bt(size1t)+bl(size1t));
+	Sh1 = emptymesh(Sh1aux);
+}
+
+/*------------------------------------------
+	FINITE ELEMENT SPACES (EXACT SOLUTION)
+-------------------------------------------*/
+fespace Hhs1(Th1,[RT0,RT0]);
+fespace Hhu1(Th1,[P1,P1]);
+fespace Hhg1(Th1,P0);
+fespace Hhp1(Th1,P1);
+fespace Hhl1(Sh1,P0edge);
+
+Hhs1 [sig11,sig12,sig21,sig22];
+Hhu1 [uex1,uex2];
+Hhg1 gam;
+Hhp1 phiex;
+Hhl1 lamex;
+Hhg1 pex;
+
+{
+	int totalDOF = Hhs1.ndof+Hhu1.ndof+Hhg1.ndof+Hhp1.ndof+Hhl1.ndof+1;
+	ofstream f(filename,append);
+	f << "data.DOFexact = " << totalDOF << ";\n";
+	cout << "****** TOTAL DOF NREF = " << totalDOF << endl;
+}
+
+/*-----------------------------------------------------------
+	MACROS FOR UNKNOWNS, TEST FUNCTIONS AND PARAMETERS
+------------------------------------------------------------*/
+macro fm [fm1,fm2]//
+macro g [g1,g2]//
+macro S [s11,s12,s21,s22]//
+macro u [u1,u2]//
+macro G [gam]//
+macro T [t11,t12,t21,t22]//
+macro v [v1,v2]//
+macro E [eta] // there's only one degree of freedom
+macro tr(S) (S[0]+S[3])//
+macro dev(S) [S[0]-0.5*(S[0]+S[3]),S[1],S[2],S[3]-0.5*(S[0]+S[3])] //
+macro grad(r) [dx(r),dy(r)]//
+macro Grad(v) [dx(v[0]),dy(v[0]),dx(v[1]),dy(v[1])]//
+macro div(v) (dx(v[0])+dy(v[1])) //
+macro Div(S) [dx(S[0])+dy(S[1]),dx(S[2])+dy(S[3])] //
+macro conv(u,w) [u[0]*w[0]-0.5*(u[0]*w[0]+u[1]*w[1]),
+				 u[0]*w[1],u[1]*w[0],
+				 u[1]*w[1]-0.5*(u[0]*w[0]+u[1]*w[1])]//  //(u \otimes w)^\dev
+macro Str(v) [dx(v[0]),0.5*(dy(v[0])+ dx(v[1])),0.5*(dy(v[0])+ dx(v[1])),dy(v[1])]//
+macro rot(v) (dx(v[1])-dy(v[0]))//
+
+/*-------------------------------------------
+	BOUNDARY CONDITIONS
+--------------------------------------------*/
+func phiD = 0.5*(1-cos(2*pi*x)); // only in the bottom
+// ONE COULD DEFINE phiD = 0.5*(1-cos(2*pi*x))*(1-y) in the whole boundary
+
+/*-------------------------------------------
+	FLUID PROPERTIES
+--------------------------------------------*/
+real Pr = 0.5;
+real Ra = 2000.;
+
+real k11 = 1.;
+real k12 = 0.;
+real k22 = 1.;
+
+real g1 = 0.;
+real g2 = -1.;
+func fm1 = 0;
+func fm2 = 0;
+func fe = 0;
+
+
+/*---------------------------
+	EXACT SOLUTION
+----------------------------*/
+{
+	macro w0 [w1,w2]//
+	Hhu1 w0;
+	Hhp1 phi0;
+
+	// VISCOSITY (IT CHANGES DUE TO phi0 IN SEVERAL SPACES)
+	func mu = exp(-phi0);
+	real mu1 = exp(-1.0);
+	real mu2 = 1.0;
+	cout << "mu1 = " << mu1 << endl;
+	cout << "mu2 = " << mu2 << endl;
+
+	/*-------------------------------------------
+		STABILIZATION PARAMETERS
+	--------------------------------------------*/
+	real kappa1 = 2*Pr*mu1^2/mu2;
+	real kappa2 = 1/mu2;
+	real kappa0 = 1.;
+	real kappa3 = kappa0*mu1^2*Pr/mu2;
+	real kappa4 = Pr*mu1^2/mu2;
+
+	cout << endl;
+	cout << "Stabilization Parameters:" << endl;
+	cout << "kappa1 = " << kappa1 << endl;
+	cout << "kappa2 = " << kappa2 << endl;
+	cout << "kappa3 = " << kappa3 << endl;
+	cout << "kappa4 = " << kappa4 << endl;
+	cout << endl;
+
+	/*----------------------------------------------------
+		BILINEAR FORMS AND RIGHT-HAND SIDES
+	-----------------------------------------------------*/
+	// Momentum Equation
+	varf A1(S,T) = int2d(Th1,optimize=0)(0.5*(Pr*mu)^(-1)*dev(S)'*T + kappa2*Div(S)'*Div(T));
+	varf A2(S,v) = int2d(Th1,optimize=0)(-0.5*kappa1*(Pr*mu)^(-1)*dev(S)'*Str(v)-v'*Div(S)); 
+	varf A3(S,E) = -int2d(Th1)(E[0]*(S[2]-S[1]));
+	varf A4(u,T) = int2d(Th1,optimize=0)(u'*Div(T) + 0.5*(Pr*mu)^(-1)*conv(u,w0)'*T);
+	varf A5(u,v) = int2d(Th1,optimize=0)(kappa1*Str(u)'*Str(v) - 0.5*kappa1*(Pr*mu)^(-1)*conv(u,w0)'*Str(v)) 
+					+ int1d(Th1,4,1,3,2)(kappa4*u'*v);
+	varf A6(u,E) = int2d(Th1)(-kappa3*E[0]*rot(u));
+	varf A7(G,T) = int2d(Th1)(G[0]*(T[2]-T[1]));
+	varf A8(G,E) = int2d(Th1)(kappa3*2.*G[0]*E[0]);
+	varf A9([unused],S)=int2d(Th1)(tr(S));
+
+	varf RHSM1([unused],T) = int2d(Th1)(Ra*Pr*kappa2*phi0*g'*Div(T)) - int2d(Th1)(kappa2*fm'*Div(T));
+	varf RHSM2([unused],v) = -int2d(Th1)(Ra*Pr*phi0*g'*v) + int2d(Th1)(fm'*v);
+
+	// Energy Equation
+	varf a(phi,psi) = int2d(Th1)([k11*dx(phi)+k12*dy(phi),k12*dx(phi)+k22*dy(phi)]'*grad(psi));
+	varf b(psi,lam) = int1d(Th1,4,1,3,2)(lam*psi);
+	// Penalization for the interior edges of Sh1
+	varf c(lam,xi) = intalledges(Sh1)(1E-12*(1-nTonEdge)*lam*xi);
+
+	varf RHSE1(unused,psi) = -int2d(Th1)(psi*w0'*grad(phi0)) + int2d(Th1)(fe*psi); 
+	varf RHSE2(unused,xi) = int1d(Th1,2)(phiD*xi);
+
+	/*-----------------------------------------------------
+		STIFFNESS MATRIX: ENERGY EQUATION
+	------------------------------------------------------*/
+	matrix Me;
+	{
+		matrix Ma = a(Hhp1,Hhp1);
+		matrix Mb = b(Hhp1,Hhl1);
+		matrix Mc = c(Hhl1,Hhl1);
+		Me = [[Ma, Mb'], 
+		 	  [Mb, Mc ]];
+	}
+
+	/*-----------------------------------------------------
+		PICARD ITERATION PRELIMINARIES
+	------------------------------------------------------*/
+	w0 = [1.0e-3,1.0e-3];
+	phi0 = 0.5;
+	real[int] sol(Hhs1.ndof+Hhu1.ndof+Hhg1.ndof+Hhp1.ndof+Hhl1.ndof+1);
+	sol = 0;
+
+	int iter = 0;
+	real tol = 10000.; // tol = Inf
+
+	while((tol > 1e-8) && (iter < 500)){
+		// STIFFNESS MATRIX: MOMENTUM EQUATION
+		matrix Mm;
+		{
+			matrix MA3 = A3(Hhs1,Hhg1);
+			matrix MA6 = A6(Hhu1,Hhg1);
+			matrix MA7 = A7(Hhg1,Hhs1);
+			matrix MA8 = A8(Hhg1,Hhg1);
+			real[int] MA9 = A9(0,Hhs1); 
+			// (w,phi)-dependent local matrices
+			matrix MA1 = A1(Hhs1,Hhs1);
+			matrix MA2 = A2(Hhs1,Hhu1);
+			matrix MA4 = A4(Hhu1,Hhs1);
+			matrix MA5 = A5(Hhu1,Hhu1);
+			Mm = [[MA1, MA4, MA7, MA9],
+				  [MA2, MA5, 0,   0  ],
+				  [MA3, MA6, MA8, 0  ],
+				  [MA9',  0, 0,   0  ]];
+		}
+		// (w,phi)-dependent load vector for the Momentum Equation
+		real[int] Lm(Hhs1.ndof+Hhu1.ndof+Hhg1.ndof+1);
+		{
+			Lm = 0;
+			Lm(0:Hhs1.ndof-1) = RHSM1(0,Hhs1);
+			Lm(Hhs1.ndof:Hhs1.ndof+Hhu1.ndof-1) = RHSM2(0,Hhu1);
+		}
+		// Solving Momentum Equation
+		set(Mm,solver = sparsesolver);
+		real[int] solm = Mm^-1*Lm;
+		// Setting a new w0
+		Hhu1 [zh1,zh2] = [0.,0.];
+		zh1[] = solm(Hhs1.ndof:Hhs1.ndof+Hhu1.ndof-1);
+		w0 = [zh1,zh2];
+
+		// (w,phi)-dependent load vector for the Energy Equation
+		real[int] Le(Hhp1.ndof+Hhl1.ndof);
+		{
+			Le = 0;
+			Le(0:Hhp1.ndof-1) = RHSE1(0,Hhp1);
+			Le(Hhp1.ndof:Hhp1.ndof+Hhl1.ndof-1) = RHSE2(0,Hhl1);
+		}
+		// Solving Energy Equation
+		set(Me,solver = sparsesolver);
+		real[int] sole = Me^-1*Le;
+		// Setting a new phi0
+		Hhp1 phi1 = 0;
+		phi1[] = sole(0:Hhp1.ndof-1);
+		phi0 = phi1;
+
+		// Assembling the global solution
+		real[int] solnew(Hhs1.ndof+Hhu1.ndof+Hhg1.ndof+Hhp1.ndof+Hhl1.ndof+1);
+		{
+			solnew = 0;
+			solnew(0:Hhs1.ndof+Hhu1.ndof+Hhg1.ndof) = solm;
+			solnew(Hhs1.ndof+Hhu1.ndof+Hhg1.ndof+1:Hhs1.ndof+Hhu1.ndof+Hhg1.ndof+Hhp1.ndof+Hhl1.ndof) = sole;
+		}
+
+		// Stopping criteria
+		real[int] diff = sol-solnew;
+		tol = sqrt(diff'*diff)/sqrt(solnew'*solnew);
+		++iter;
+		sol = solnew;
+
+		cout << "nref = " << nref << "    Iteration: " << iter << "    Rel. Error: " << tol << endl;
+		cout << "solm.max = " << solm.max << endl;
+		cout << "solm.min = " << solm.min << endl;
+		cout << "sole.max = " << sole.max << endl;
+		cout << "sole.min = " << sole.min << endl;
+	}
+
+	[sig11,sig12,sig21,sig22] = [0,0,0,0];
+	sig11[] = sol(0:Hhs1.ndof-1);
+	[uex1,uex2] = [0,0]; 
+	uex1[] = sol(Hhs1.ndof:Hhs1.ndof+Hhu1.ndof-1);
+	gam = 0;
+	gam[] = sol(Hhs1.ndof+Hhu1.ndof:Hhs1.ndof+Hhu1.ndof+Hhg1.ndof-1);
+	phiex = 0;
+	phiex[] = sol(Hhs1.ndof+Hhu1.ndof+Hhg1.ndof+1:Hhs1.ndof+Hhu1.ndof+Hhg1.ndof+Hhp1.ndof);
+	lamex = 0;
+	lamex[] = sol(Hhs1.ndof+Hhu1.ndof+Hhg1.ndof+Hhp1.ndof+1:Hhs1.ndof+Hhu1.ndof+Hhg1.ndof+Hhp1.ndof+Hhl1.ndof);
+	real meas = int2d(Th1)(1.0);
+	real cc = int2d(Th1)((uex1^2+uex2^2)/(2.*meas)); //cT
+	pex = -0.5*(sig11 + uex1^2 + sig22 + uex2^2 - 2.*cc); // Piecewise constant
+
+	plot(phiex,[uex1,uex2],nbiso=20,fill=1,value=1);
+}
+
+/*----------------------------------------------
+	NUMERICAL APPROXIMATIONS
+-----------------------------------------------*/
+for (int n=0; n<nref; n++){
+	
+	int size = 2^(n+3);
+	int sizet = size/2;
+
+	mesh Th = buildmesh ( bt(size) + bb(size) + bl(size) + br(size));
+	mesh Sh;
+	{
+		mesh Shaux = buildmesh ( bt(sizet) + bb(sizet) + bl(sizet) + br(sizet));
+		Sh = emptymesh(Shaux);
+	}
+
+	/*------------------------------------------
+		FINITE ELEMENT SPACES
+	-------------------------------------------*/
+
+	fespace Hhs(Th,[RT0,RT0]);
+	fespace Hhu(Th,[P1,P1]);
+	fespace Hhg(Th,P0);
+	fespace Hhp(Th,P1);
+	fespace Hhl(Sh,P0edge);
+
+	Hhg h=hTriangle; // mesh size
+    hmesh[n] = h[].max;
+    hbord[n] = 1.0 / sizet;
+
+	macro w0 [w1,w2]//
+	Hhu1 w0;
+	Hhp1 phi0;
+
+	// VISCOSITY (IT CHANGES DUE TO phi0 IN SEVERAL SPACES)
+	func mu = exp(-phi0);
+	real mu1 = exp(-1.0);
+	real mu2 = 1.0;
+	cout << "mu1 = " << mu1 << endl;
+	cout << "mu2 = " << mu2 << endl;
+
+	/*-------------------------------------------
+		STABILIZATION PARAMETERS
+	--------------------------------------------*/
+	real kappa1 = 2*Pr*mu1^2/mu2;
+	real kappa2 = 1/mu2;
+	real kappa0 = 1.;
+	real kappa3 = kappa0*mu1^2*Pr/mu2;
+	real kappa4 = Pr*mu1^2/mu2;
+
+	cout << endl;
+	cout << "Stabilization Parameters:" << endl;
+	cout << "kappa1 = " << kappa1 << endl;
+	cout << "kappa2 = " << kappa2 << endl;
+	cout << "kappa3 = " << kappa3 << endl;
+	cout << "kappa4 = " << kappa4 << endl;
+	cout << endl;
+
+	/*----------------------------------------------------
+		BILINEAR FORMS AND RIGHT-HAND SIDES
+	-----------------------------------------------------*/
+	// Momentum Equation
+	varf A1(S,T) = int2d(Th)(0.5*(Pr*mu)^(-1)*dev(S)'*T + kappa2*Div(S)'*Div(T));
+	varf A2(S,v) = int2d(Th)(-0.5*kappa1*(Pr*mu)^(-1)*dev(S)'*Str(v)-v'*Div(S)); 
+	varf A3(S,E) = -int2d(Th)(E[0]*(S[2]-S[1]));
+	varf A4(u,T) = int2d(Th)(u'*Div(T) + 0.5*(Pr*mu)^(-1)*conv(u,w0)'*T);
+	varf A5(u,v) = int2d(Th)(kappa1*Str(u)'*Str(v) - 0.5*kappa1*(Pr*mu)^(-1)*conv(u,w0)'*Str(v)) 
+					+ int1d(Th,4,1,3,2)(kappa4*u'*v);
+	varf A6(u,E) = int2d(Th)(-kappa3*E[0]*rot(u));
+	varf A7(G,T) = int2d(Th)(G[0]*(T[2]-T[1]));
+	varf A8(G,E) = int2d(Th)(kappa3*2.*G[0]*E[0]);
+	varf A9([unused],S)=int2d(Th)(tr(S));
+
+	varf RHSM1([unused],T) = int2d(Th)(Ra*Pr*kappa2*phi0*g'*Div(T)) - int2d(Th)(kappa2*fm'*Div(T));
+	varf RHSM2([unused],v) = -int2d(Th)(Ra*Pr*phi0*g'*v) + int2d(Th)(fm'*v);
+
+	// Energy Equation
+	varf a(phi,psi) = int2d(Th)([k11*dx(phi)+k12*dy(phi),k12*dx(phi)+k22*dy(phi)]'*grad(psi));
+	varf b(psi,lam) = int1d(Th,4,1,3,2)(lam*psi);
+	// Penalization for the interior edges of Sh
+	varf c(lam,xi) = intalledges(Sh)(1E-12*(1-nTonEdge)*lam*xi);
+
+	varf RHSE1(unused,psi) = -int2d(Th)(psi*w0'*grad(phi0)) + int2d(Th)(fe*psi); 
+	varf RHSE2(unused,xi) = int1d(Th,2)(phiD*xi);
+
+	/*-----------------------------------------------------
+		STIFFNESS MATRIX: ENERGY EQUATION
+	------------------------------------------------------*/
+	matrix Me;
+	{
+		matrix Ma = a(Hhp,Hhp);
+		matrix Mb = b(Hhp,Hhl);
+		matrix Mc = c(Hhl,Hhl);
+		Me = [[Ma, Mb'], 
+		 	  [Mb, Mc ]];
+	}
+
+	/*-----------------------------------------------------
+		PICARD ITERATION PRELIMINARIES
+	------------------------------------------------------*/
+	w0 = [1e-3,1e-3];
+	phi0 = 0.5;
+	real[int] sol(Hhs.ndof+Hhu.ndof+Hhg.ndof+Hhp.ndof+Hhl.ndof+1);
+	sol = 0;
+
+	int iter = 0;
+	real tol = 10000.; // tol = Inf
+
+	while((tol > 1e-8) && (iter < 200)){
+		// STIFFNESS MATRIX: MOMENTUM EQUATION
+		matrix Mm;
+		{
+			matrix MA3 = A3(Hhs,Hhg);
+			matrix MA6 = A6(Hhu,Hhg);
+			matrix MA7 = A7(Hhg,Hhs);
+			matrix MA8 = A8(Hhg,Hhg);
+			real[int] MA9 = A9(0,Hhs); 
+			// (w,phi)-dependent local matrices
+			matrix MA1 = A1(Hhs,Hhs);
+			matrix MA2 = A2(Hhs,Hhu);
+			matrix MA4 = A4(Hhu,Hhs);
+			matrix MA5 = A5(Hhu,Hhu);
+			Mm = [[MA1, MA4, MA7, MA9],
+				  [MA2, MA5, 0,   0  ],
+				  [MA3, MA6, MA8, 0  ],
+				  [MA9',  0, 0,   0  ]];
+		}
+		// (w,phi)-dependent load vector for the Momentum Equation
+		real[int] Lm(Hhs.ndof+Hhu.ndof+Hhg.ndof+1);
+		{
+			Lm = 0;
+			Lm(0:Hhs.ndof-1) = RHSM1(0,Hhs);
+			Lm(Hhs.ndof:Hhs.ndof+Hhu.ndof-1) = RHSM2(0,Hhu);
+		}
+		// Solving Momentum Equation
+		set(Mm,solver = sparsesolver);
+		real[int] solm = Mm^-1*Lm;
+		// Setting a new w0
+		Hhu [zh1,zh2] = [0.,0.];
+		zh1[] = solm(Hhs.ndof:Hhs.ndof+Hhu.ndof-1);
+		w0 = [zh1,zh2];
+
+		// (w,phi)-dependent load vector for the Energy Equation
+		real[int] Le(Hhp.ndof+Hhl.ndof);
+		{
+			Le = 0;
+			Le(0:Hhp.ndof-1) = RHSE1(0,Hhp);
+			Le(Hhp.ndof:Hhp.ndof+Hhl.ndof-1) = RHSE2(0,Hhl);
+		}
+		// Solving Energy Equation
+		set(Me,solver = sparsesolver);
+		real[int] sole = Me^-1*Le;
+		// Setting a new phi0
+		Hhp phi1 = 0;
+		phi1[] = sole(0:Hhp.ndof-1);
+		phi0 = phi1;
+
+		// Assembling the global solution
+		real[int] solnew(Hhs.ndof+Hhu.ndof+Hhg.ndof+Hhp.ndof+Hhl.ndof+1);
+		{
+			solnew = 0;
+			solnew(0:Hhs.ndof+Hhu.ndof+Hhg.ndof) = solm;
+			solnew(Hhs.ndof+Hhu.ndof+Hhg.ndof+1:Hhs.ndof+Hhu.ndof+Hhg.ndof+Hhp.ndof+Hhl.ndof) = sole;
+		}
+
+		// Stopping criteria
+		real[int] diff = sol-solnew;
+		tol = sqrt(diff'*diff)/sqrt(solnew'*solnew);
+		++iter;
+		sol = solnew;
+
+		cout << "nref = " << n << "    Iteration: " << iter << "    Rel. Error: " << tol << endl;
+		cout << "solm.max = " << solm.max << endl;
+		cout << "solm.min = " << solm.min << endl;
+		cout << "sole.max = " << sole.max << endl;
+		cout << "sole.min = " << sole.min << endl;
+	}
+
+	DOF[n] = Hhs.ndof+Hhu.ndof+Hhg.ndof+Hhp.ndof+Hhl.ndof+1;
+	iterations[n] = iter;
+
+	Hhs [sigh11,sigh12,sigh21,sigh22] = [0,0,0,0];
+	sigh11[] = sol(0:Hhs.ndof-1); 
+
+	Hhu [uh1,uh2] = [0,0];
+	uh1[] = sol(Hhs.ndof:Hhs.ndof+Hhu.ndof-1);
+
+	Hhg gamh = 0;
+	gamh[] = sol(Hhs.ndof+Hhu.ndof:Hhs.ndof+Hhu.ndof+Hhg.ndof-1);
+
+	Hhp phih = 0;
+	phih[] = sol(Hhs.ndof+Hhu.ndof+Hhg.ndof+1:Hhs.ndof+Hhu.ndof+Hhg.ndof+Hhp.ndof);
+
+	Hhl lamh = 0;
+	lamh[] = sol(Hhs.ndof+Hhu.ndof+Hhg.ndof+Hhp.ndof+1:Hhs.ndof+Hhu.ndof+Hhg.ndof+Hhp.ndof+Hhl.ndof);
+
+	real meas = int2d(Th)(1.0);
+	real ch = int2d(Th)((uh1^2+uh2^2)/(2.*meas)); //cT
+
+	Hhg ph = -0.5*(sigh11 + uh1^2 + sigh22 + uh2^2 - 2.*ch);
+
+	plot([uh1,uh2],fill=1,value=1,nbiso=20);
+
+
+	/*---------------------------------------------
+		ERRORS AND RATES OF CONVERGENCE
+	----------------------------------------------*/
+
+	errorL2s[n] = int2d(Th)((sig11-sigh11)^2+(sig12-sigh12)^2+(sig21-sigh21)^2+(sig22-sigh22)^2);
+	errorDivs[n] = int2d(Th)((dx(sig11)+dy(sig12)-dx(sigh11)-dy(sigh12))^2 
+								+ (dx(sig21)+dy(sig22)-dx(sigh21)-dy(sigh22))^2);
+	errorHdivs[n] = sqrt(errorL2s[n] + errorDivs[n]);
+
+	errorL2u[n] = int2d(Th)((uex1-uh1)^2+(uex2-uh2)^2);
+	errorGradu[n] = int2d(Th)((dx(uex1)-dx(uh1))^2 + (dy(uex1)-dy(uh1))^2 
+								+ (dx(uex2)-dx(uh2))^2 + (dy(uex2)-dy(uh2))^2);
+	errorH1u[n] = sqrt(errorL2u[n] + errorGradu[n]);
+
+	errorL2g[n] = sqrt(int2d(Th)(2*(gam-gamh)^2));
+
+	errorL2phi[n] = int2d(Th)((phiex-phih)^2);
+	errorGradphi[n] = int2d(Th)((dx(phiex)-dx(phih))^2 + (dy(phiex)-dy(phih))^2);
+	errorH1phi[n] = sqrt(errorL2phi[n] + errorGradphi[n]);
+
+	errorL2lam[n] = sqrt( int1d(Th,4,1,3,2)((lamex-lamh)^2));
+
+	errortotal[n] = sqrt(errorHdivs[n]^2 + errorH1u[n]^2 + errorL2g[n]^2 
+							+ errorH1phi[n]^2 + errorL2lam[n]^2);
+
+	errorL2pre[n] = sqrt( int2d(Th)((pex-ph)^2) );
+
+	if (n > 0){
+		rates[n] = log(errorHdivs[n-1]/errorHdivs[n])/log(hmesh[n-1]/hmesh[n]);
+		rateu[n] = log(errorH1u[n-1]/errorH1u[n])/log(hmesh[n-1]/hmesh[n]);
+		rateg[n] = log(errorL2g[n-1]/errorL2g[n])/log(hmesh[n-1]/hmesh[n]);
+		ratephi[n] = log(errorH1phi[n-1]/errorH1phi[n])/log(hmesh[n-1]/hmesh[n]);
+		ratelam[n] = log(errorL2lam[n-1]/errorL2lam[n])/log(hbord[n-1]/hbord[n]);
+		ratepre[n] = log(errorL2pre[n-1]/errorL2pre[n])/log(hmesh[n-1]/hmesh[n]);
+	}
+
+	/*-----------------------------------------
+		WRITING TO FILE
+	------------------------------------------*/
+	// Uncomment to export data into a .m file
+	{
+	ofstream f(filename,append);
+	f.scientific << "data.DOF(" << n+1 << ") = " << DOF[n] << ";\n";
+	f.scientific << "data.hmesh(" << n+1 << ") = " << hmesh[n] << ";\n";
+	f.scientific << "data.hbord(" << n+1 << ") = " << hbord[n] << ";\n";
+	f.scientific << "data.errorHdivs(" << n+1 << ") = " << errorHdivs[n] << ";\n";
+	f.scientific << "data.errorH1u(" << n+1 << ") = " << errorH1u[n] << ";\n";
+	f.scientific << "data.errorL2g(" << n+1 << ") = " << errorL2g[n] << ";\n";
+	f.scientific << "data.errorH1phi(" << n+1 << ") = " << errorH1phi[n] << ";\n";
+	f.scientific << "data.errorL2lam(" << n+1 << ") = " << errorL2lam[n] << ";\n";
+	f.scientific << "data.errorL2pre(" << n+1 << ") = " << errorL2pre[n] << ";\n";
+	f.scientific << "data.rates(" << n+1 << ") = " << rates[n] << ";\n";
+	f.scientific << "data.rateu(" << n+1 << ") = " << rateu[n] << ";\n";
+	f.scientific << "data.rateg(" << n+1 << ") = " << rateg[n] << ";\n";
+	f.scientific << "data.ratephi(" << n+1 << ") = " << ratephi[n] << ";\n";
+	f.scientific << "data.ratelam(" << n+1 << ") = " << ratelam[n] << ";\n";
+	f.scientific << "data.ratepre(" << n+1 << ") = " << ratepre[n] << ";\n";
+	f.scientific << "data.iterations(" << n+1 << ") = " << iterations[n] << ";\n";
+	}
+
+	/*-----------------------------------------
+		EXPORTING GRAPHICS
+	------------------------------------------*/
+	// Uncomment to export graphics
+	/*
+	savevtk("nc_numerical_"+n+".vtk",Th,[uh1,uh2,0],ph,phih,dataname="app_vel app_pre app_temp");
+	cout << "nc_numerical_"+n+".vtk saved" << endl;
+	savevtk("nc_exact_"+n+".vtk",Th,[uex1,uex2,0],pex,phiex,dataname="exact_vel exact_pre exact_temp");
+	cout << "nc_exact_"+n+".vtk saved" << endl;
+	*/
+}
+
+/*---------------------------------
+	RESULTS TO TERMINAL
+----------------------------------*/
+
+cout << "------------------ S U M M A R Y   O F   R E S U L T S ------------------" << endl;
+for (int n=0; n < nref; n++) cout << "(" << n << ") " << "DOF = " << DOF[n] << endl;
+for (int n=0; n < nref; n++) cout << "(" << n << ") " << "hmesh = " << hmesh[n] << endl;
+for (int n=0; n < nref; n++) cout << "(" << n << ") " << "errorHdivs = " << errorHdivs[n] << endl;
+for (int n=0; n < nref; n++) cout << "(" << n << ") " << "rates = " << rates[n] << endl;
+for (int n=0; n < nref; n++) cout << "(" << n << ") " << "errorH1u = " << errorH1u[n] << endl;
+for (int n=0; n < nref; n++) cout << "(" << n << ") " << "rateu = " << rateu[n] << endl;
+for (int n=0; n < nref; n++) cout << "(" << n << ") " << "errorL2g = " << errorL2g[n] << endl;
+for (int n=0; n < nref; n++) cout << "(" << n << ") " << "rateg = " << rateg[n] << endl;
+for (int n=0; n < nref; n++) cout << "(" << n << ") " << "errorH1phi = " << errorH1phi[n] << endl;
+for (int n=0; n < nref; n++) cout << "(" << n << ") " << "ratephi = " << ratephi[n] << endl;
+for (int n=0; n < nref; n++) cout << "(" << n << ") " << "errorL2lam = " << errorL2lam[n] << endl;
+for (int n=0; n < nref; n++) cout << "(" << n << ") " << "ratelam = " << ratelam[n] << endl;
+for (int n=0; n < nref; n++) cout << "(" << n << ") " << "errorL2pre = " << errorL2pre[n] << endl;
+for (int n=0; n < nref; n++) cout << "(" << n << ") " << "ratepre = " << ratepre[n] << endl;

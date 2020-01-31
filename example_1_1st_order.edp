@@ -1,0 +1,465 @@
+/*
+	SOLVE THE BOUSSINESQ PROBLEM USING THE FINITE ELEMENT
+	RT0-P1-P0-P1-P0
+
+	Author: 
+		Javier Almonacid
+		Research Assistant
+		Center for Research in Mathematical Engineering (CI2MA)
+		Universidad de Concepcion
+		Date: August 27, 2018
+
+	Article:
+		J.A. Almonacid, G.N. Gatica and R. Oyarzua,
+		"A mixed-primal finite element method for the Boussinesq 
+		problem with temperature-dependent viscosity". 
+		Calcolo 55 (2018), no. 3, Art. 36, 42 pp.
+*/
+load "iovtk";
+load "UMFPACK64";
+
+string filename = "example_01.m";
+
+int nref = 5; // max nref = 6 (in a PC with 16 GB of RAM).
+
+// Error Approximation
+real errorL2s; real errorDivs; real[int] errorHdivs(nref);
+real errorL2u; real errorGradu; real[int] errorH1u(nref);
+real[int] errorL2g(nref);
+real errorL2phi; real errorGradphi; real[int] errorH1phi(nref);
+real[int] errorL2lam(nref);
+real[int] errorL2pre(nref);
+
+// Rates of convergence
+real[int] rates(nref); rates[0] = 0.; 
+real[int] rateu(nref); rateu[0] = 0.;
+real[int] rateg(nref); rateg[0] = 0.;
+real[int] ratephi(nref); ratephi[0] = 0.;
+real[int] ratelam(nref); ratelam[0] = 0.;
+real[int] ratepre(nref); ratepre[0] = 0.;
+
+real[int] DOF(nref);
+real[int] hmesh(nref);
+real[int] hbord(nref);
+real[int] iterations(nref);
+
+// UNCOMMENT TO EXPORT DATA TO A .M FILE
+/*{
+	ofstream f(filename);
+	f << "data.DOF = zeros(" << 1 << "," << nref << ");\n";
+	f << "data.hmesh = zeros(" << 1 << "," << nref << ");\n";
+	f << "data.hbord = zeros(" << 1 << "," << nref << ");\n";
+	f << "data.errorHdivs = zeros(" << 1 << "," << nref << ");\n";
+	f << "data.errorH1u = zeros(" << 1 << "," << nref << ");\n";
+	f << "data.errorL2g = zeros(" << 1 << "," << nref << ");\n";
+	f << "data.errorH1phi = zeros(" << 1 << "," << nref << ");\n";
+	f << "data.errorL2lam = zeros(" << 1 << "," << nref << ");\n";
+	f << "data.errorL2pre = zeros(" << 1 << "," << nref << ");\n";
+	f << "data.rates = zeros(" << 1 << "," << nref << ");\n";
+	f << "data.rateu = zeros(" << 1 << "," << nref << ");\n";
+	f << "data.rateg = zeros(" << 1 << "," << nref << ");\n";
+	f << "data.ratephi = zeros(" << 1 << "," << nref << ");\n";
+	f << "data.ratelam = zeros(" << 1 << "," << nref << ");\n";
+	f << "data.ratepre = zeros(" << 1 << "," << nref << ");\n";
+	f << "data.iterations = zeros(" << 1 << "," << nref << ");\n";
+}*/
+
+for (int n=0; n<nref; n++){
+
+	cout << "----------------------------------------" << endl;
+	cout << "Starting iteration n = " << n << endl;
+	cout << "----------------------------------------" << endl;
+
+	int size = 2^(n+3);
+	int sizet = size/2;
+	//           1
+	//     -------------
+	//     |            |
+	//     |            |
+	//    3|            |4
+	//     |            |
+	//     |            |
+	//     -------------
+	//           2
+	border bb(t=0,1){x=t; y=0.; label =2;};
+	border br(t=0,1){x=1.; y=t; label =4;};
+	border bt(t=1,0){x=t; y=1; label =1;};
+	border bl(t=1,0){x=0.; y=t; label =3;};
+
+	mesh Th    = buildmesh ( bt(size) + bb(size) + bl(size) + br(size));
+	mesh Sh;
+	{
+		mesh Shaux = buildmesh ( bt(sizet) + bb(sizet) + bl(sizet) + br(sizet));
+		Sh    = emptymesh(Shaux);	// Mesh for the Lagrange multiplier
+	}
+
+	/*------------------------------------------
+		Finite Element Spaces
+	-------------------------------------------*/
+	fespace Hhs(Th,[RT0,RT0]);
+	fespace Hhu(Th,[P1,P1]);
+	fespace Hhg(Th,P0); // L2skew in 2D has just ONE degree of freedom
+	fespace Hhp(Th,P1);
+	fespace Hhl(Sh,P0edge);
+
+	int totalDOF = Hhs.ndof+Hhu.ndof+Hhg.ndof+Hhp.ndof+Hhl.ndof+1;
+	cout << "Total DOF = " << totalDOF << endl;
+	DOF[n] = totalDOF;
+
+	{
+		Hhg h=hTriangle;
+		hmesh[n] = h[].max;
+		hbord[n] = 2./sizet;
+	}
+
+	macro w0 [w1,w2]//
+	Hhu w0;
+	Hhp phi0;
+
+	/*------------------------------------------
+		Known data
+	-------------------------------------------*/
+	real g1 = 0.;
+	real g2 = 1.;
+	func mu = exp(-phi0); 				// Viscosity
+	real mu1 = exp(5.0); real mu2 = exp(-5.0); 	// Bounds for the viscosity
+	func k11 = exp(x+y); 	// Thermal Conductivity Tensor
+	func k12 = 0.0;
+	func k22 = exp(x+y);
+	/*--------------------------------------------
+		Exact solutions and source terms
+	---------------------------------------------*/
+
+	func pex = (x-0.5)*(y-0.5);
+	func uex1 = 4.0*y*(x^2-1.0)^2*(y^2-1.0);
+	func uex2 = -4.0*x*(y^2-1.0)^2*(x^2-1.0);
+	func phiex = cos(x*y) + 1;
+
+	func duex1dx = 16.0*x*y*(x^2 - 1.0)*(y^2 - 1.0);
+	func duex1dy = 8.0*y^2*(x^2 - 1.0)^2 + 4.0*(x^2 - 1.0)^2*(y^2 - 1.0);
+	func duex2dx = - 8.0*x^2*(y^2 - 1.0)^2 - 4.0*(x^2 - 1.0)*(y^2 - 1.0)^2;
+	func duex2dy = -16.0*x*y*(x^2 - 1.0)*(y^2 - 1.0);
+	
+	func dphiexdx = -y*sin(x*y);
+	func dphiexdy = -x*sin(x*y);
+
+	func uD1 = uex1;
+	func uD2 = uex2;
+	func phiD = phiex;
+
+	// Source terms
+	func fm1 = 1.0*y + 0.5*exp(- cos(x*y) - 1)*(32.0*x^2*y*(y^2 - 1.0) - 24.0*y*(x^2 - 1.0)^2 + 16.0*y*(x^2 - 1.0)*(y^2 - 1.0)) - g1*(cos(x*y) + 1) + 0.5*x*exp(- cos(x*y) - 1)*sin(x*y)*(8.0*x^2*(y^2 - 1.0)^2 - 8.0*y^2*(x^2 - 1.0)^2 + 4.0*(x^2 - 1.0)*(y^2 - 1.0)^2 - 4.0*(x^2 - 1.0)^2*(y^2 - 1.0)) + 64.0*x*y^2*(x^2 - 1.0)^3*(y^2 - 1.0)^2 - 16.0*y*exp(- cos(x*y) - 1)*(x^2 - 1.0)*(y^2 - 1.0) - 4.0*x*(x^2 - 1.0)*(y^2 - 1.0)^2*(8.0*y^2*(x^2 - 1.0)^2 + 4.0*(x^2 - 1.0)^2*(y^2 - 1.0)) - 32.0*x^2*y*exp(- cos(x*y) - 1)*(y^2 - 1.0) - 16.0*x*y^2*exp(- cos(x*y) - 1)*sin(x*y)*(x^2 - 1.0)*(y^2 - 1.0) - 0.5;
+	func fm2 = 1.0*x - 0.5*exp(- cos(x*y) - 1)*(32.0*x*y^2*(x^2 - 1.0) - 24.0*x*(y^2 - 1.0)^2 + 16.0*x*(x^2 - 1.0)*(y^2 - 1.0)) - g2*(cos(x*y) + 1) + 0.5*y*exp(- cos(x*y) - 1)*sin(x*y)*(8.0*x^2*(y^2 - 1.0)^2 - 8.0*y^2*(x^2 - 1.0)^2 + 4.0*(x^2 - 1.0)*(y^2 - 1.0)^2 - 4.0*(x^2 - 1.0)^2*(y^2 - 1.0)) + 64.0*x^2*y*(x^2 - 1.0)^2*(y^2 - 1.0)^3 + 16.0*x*exp(- cos(x*y) - 1)*(x^2 - 1.0)*(y^2 - 1.0) - 4.0*y*(x^2 - 1.0)^2*(y^2 - 1.0)*(8.0*x^2*(y^2 - 1.0)^2 + 4.0*(x^2 - 1.0)*(y^2 - 1.0)^2) + 32.0*x*y^2*exp(- cos(x*y) - 1)*(x^2 - 1.0) + 16.0*x^2*y*exp(- cos(x*y) - 1)*sin(x*y)*(x^2 - 1.0)*(y^2 - 1.0) - 0.5;
+	func fe = x*exp(x + y)*sin(x*y) + y*exp(x + y)*sin(x*y) + x^2*exp(x + y)*cos(x*y) + y^2*exp(x + y)*cos(x*y) + 4.0*x^2*sin(x*y)*(x^2 - 1.0)*(y^2 - 1.0)^2 - 4.0*y^2*sin(x*y)*(x^2 - 1.0)^2*(y^2 - 1.0);
+
+	// Stabilization parameters
+	real kappa1 = mu1^2/mu2;
+	real kappa2 = 1./mu2;
+	real kappa0 = 1.; 				// Heuristic choice
+	real kappa3 = kappa0*mu1^2/(2.0*mu2);
+	real kappa4 = mu1^2/(2.0*mu2);
+
+	/*-----------------------------------------------------------
+		Macros for unknowns, test functions and parameters
+	------------------------------------------------------------*/
+	macro fm [fm1,fm2]//
+	macro g [g1,g2]//
+	macro S [s11,s12,s21,s22]//
+	macro u [u1,u2]//
+	macro G [gam]//
+	macro T [t11,t12,t21,t22]//
+	macro v [v1,v2]//
+	macro E [eta] //
+	macro tr(S) (S[0]+S[3])//
+	macro dev(S) [S[0]-0.5*(S[0]+S[3]),S[1],S[2],S[3]-0.5*(S[0]+S[3])] //
+	macro grad(r) [dx(r),dy(r)]//
+	macro Grad(v) [dx(v[0]),dy(v[0]),dx(v[1]),dy(v[1])]//
+	macro div(v) (dx(v[0])+dy(v[1])) //
+	macro Div(S) [dx(S[0])+dy(S[1]),dx(S[2])+dy(S[3])] //
+	macro conv(u,w) [u[0]*w[0]-0.5*(u[0]*w[0]+u[1]*w[1]),
+					 u[0]*w[1],u[1]*w[0],
+					 u[1]*w[1]-0.5*(u[0]*w[0]+u[1]*w[1])]//  //(u \otimes w)^\dev
+	macro Str(v) [dx(v[0]),0.5*(dy(v[0])+ dx(v[1])),0.5*(dy(v[0])+ dx(v[1])),dy(v[1])]//
+	macro rot(v) (dx(v[1])-dy(v[0]))//
+
+	/*----------------------------------------------------
+		Bilinear Forms and Right-Hand Sides
+	-----------------------------------------------------*/
+
+	// Momentum Equation
+	varf A1(S,T) = int2d(Th)(mu^(-1)*dev(S)'*T + kappa2*Div(S)'*Div(T));
+	varf A2(S,v) = int2d(Th)(-kappa1*mu^(-1)*dev(S)'*Str(v) - v'*Div(S));
+	varf A3(S,E) = int2d(Th)(-E[0]*(S[2]-S[1]));
+	varf A4(u,T) = int2d(Th)(u'*Div(T) + mu^(-1)*conv(u,w0)'*T);
+	varf A5(u,v) = int2d(Th)(kappa1*Str(u)'*Str(v) - kappa1*mu^(-1)*conv(u,w0)'*Str(v))
+					+ int1d(Th,4,1,3,2)(kappa4*u'*v);
+	varf A6(u,E) = int2d(Th)(-kappa3*E[0]*rot(u));
+	varf A7(G,T) = int2d(Th)(G[0]*(T[2]-T[1]));
+	varf A8(G,E) = int2d(Th)(2*kappa3*G[0]*E[0]); 
+	varf A9([unused],S) = int2d(Th)(tr(S));
+
+	varf RHSM1([unused],T) = int2d(Th)(-kappa2*phi0*g'*Div(T) - kappa2*fm'*Div(T))
+					+ int1d(Th,4,1,3,2)(uD1*(T[0]*N.x+T[1]*N.y)+uD2*(T[2]*N.x+T[3]*N.y));
+
+	varf RHSM2([unused],v) = int2d(Th)(phi0*g'*v + fm'*v)
+					+ int1d(Th,4,1,3,2)(kappa4*uD1*v[0] + kappa4*uD2*v[1]);
+
+	// Energy equation
+	varf a(phi,psi) = int2d(Th)([k11*dx(phi)+k12*dy(phi),k12*dx(phi)+k22*dy(phi)]'*grad(psi));
+	varf b(psi,lam) = int1d(Th,4,1,3,2)(lam*psi);
+	varf c(lam,xi) = intalledges(Sh)(1e-12*(1-nTonEdge)*lam*xi);
+
+	varf RHSE1(unused,psi) = int2d(Th)(-psi*w0'*grad(phi0) + fe*psi);
+	varf RHSE2(unused,xi) = int1d(Th,4,1,3,2)(phiD*xi);
+
+	// Assembling the Stiffness Matrix for the Energy Equation
+	matrix Me;
+	cout << "Assembling stiffness matrix for the energy equation..." << endl;
+	{
+		matrix Ma = a(Hhp,Hhp);
+		matrix Mb = b(Hhp,Hhl);
+		matrix Mc = c(Hhl,Hhl);
+		Me = [[Ma, Mb'],
+			  [Mb, Mc]];
+	}
+	cout << "Stiffness matrix for the energy equation assembled." << endl;
+
+	/*---------------------------------------------
+		Picard iteration preliminaries
+	----------------------------------------------*/
+
+	w0 = [0,0];
+	phi0 = 0.0;
+	real[int] sol(totalDOF);
+	sol = 0;
+
+	int iter = 0;
+	real tol = 10000.; // tol = Inf
+
+	/*--------------------------------------------
+		Picard's Fixed-Point Algorithm
+	---------------------------------------------*/
+
+	while ((tol > 1e-8) && (iter < 30)){
+
+		// Assembling the Stiffness Matrix for the Momentum Equation
+		matrix Mm;		
+		cout << "Assembling stiffness matrix for the momentum equation..." << endl;
+		{
+			matrix MA3 = A3(Hhs,Hhg);
+			matrix MA6 = A6(Hhu,Hhg);
+			matrix MA7 = A7(Hhg,Hhs);
+			matrix MA8 = A8(Hhg,Hhg);
+			real[int] MA9 = A9(0,Hhs); // not a "matrix", but a "vector"
+			// (w,phi)-dependent local matrices
+			matrix MA1 = A1(Hhs,Hhs);
+			matrix MA2 = A2(Hhs,Hhu);
+			matrix MA4 = A4(Hhu,Hhs);
+			matrix MA5 = A5(Hhu,Hhu);
+			Mm = [[MA1, MA4, MA7, MA9],
+				  [MA2, MA5, 0,   0  ],
+				  [MA3, MA6, MA8, 0  ],
+				  [MA9',  0, 0,   0  ]];
+		}
+		cout << "Stiffness matrix for the momentum equation assembled." << endl;
+
+		// (w,phi)-dependent load vector for the Momentum Equation
+		cout << "Assembling load vector for the momentum equation..." << endl;
+		real[int] Lm(Hhs.ndof+Hhu.ndof+Hhg.ndof+1);
+		Lm = 0;
+		Lm(0:Hhs.ndof-1) = RHSM1(0,Hhs);
+		Lm(Hhs.ndof:Hhs.ndof+Hhu.ndof-1) = RHSM2(0,Hhu);
+		cout << "Load vector for the momentum equation assembled." << endl;
+
+		/*-------------------------------------------
+			SOLVING MOMENTUM EQUATION
+		--------------------------------------------*/
+		real[int] solm(Hhs.ndof+Hhu.ndof+Hhg.ndof+1);
+		{
+			cout << "Setting solver to sparsesolver" << endl;
+			set(Mm,solver=sparsesolver);
+			cout << "Solving momentum equation..." << endl;
+			solm = Mm^-1*Lm;
+			cout << "Momentum equation solved." << endl;
+		}
+
+		// Setting a new w0
+		{
+			Hhu [zh1,zh2] = [0.,0.];
+			zh1[] = solm(Hhs.ndof:Hhs.ndof+Hhu.ndof-1);
+			w0 = [zh1,zh2];
+		}
+
+		// (w,phi)-dependent load vector for the Energy Equation
+		cout << "Assembling load vector for the energy equation..." << endl;
+		real[int] Le(Hhp.ndof+Hhl.ndof);
+		Le = 0;
+		Le(0:Hhp.ndof-1) = RHSE1(0,Hhp);
+		Le(Hhp.ndof:Hhp.ndof+Hhl.ndof-1) = RHSE2(0,Hhl);
+		cout << "Load vector for the energy equation assembled." << endl;
+
+		/*-------------------------------------------
+			SOLVING ENERGY EQUATION
+		--------------------------------------------*/
+		real[int] sole(Hhp.ndof+Hhl.ndof);
+		{
+			cout << "Setting solver to sparsesolver" << endl;
+			set(Me,solver=sparsesolver);
+			cout << "Solving energy equation..." << endl;
+			sole = Me^-1*Le;
+			cout << "Energy equation solved." << endl;
+		}
+
+		// Setting a new phi0
+		{
+			Hhp phi1 = 0;
+			phi1[] = sole(0:Hhp.ndof-1);
+			phi0 = phi1;
+		}
+		
+		// Assembling the global solution
+		real[int] solnew(totalDOF);
+		solnew = 0;
+		solnew(0:Hhs.ndof+Hhu.ndof+Hhg.ndof) = solm;
+		solnew(Hhs.ndof+Hhu.ndof+Hhg.ndof+1:Hhs.ndof+Hhu.ndof+Hhg.ndof+Hhp.ndof+Hhl.ndof) = sole;
+
+		// Stopping criteria
+		real[int] diff = sol-solnew;
+		tol = sqrt(diff'*diff)/sqrt(solnew'*solnew);
+		++iter;
+		sol = solnew;
+
+		// Displaying information on the iteration
+		cout << "nref = " << n << "    Iteration: " << iter << "    Rel. Error: " << tol << endl;
+		cout << "solm.max = " << solm.max << endl;
+		cout << "solm.min = " << solm.min << endl;
+		cout << "sole.max = " << sole.max << endl;
+		cout << "sole.min = " << sole.min << endl;
+	}
+
+	iterations[n] = iter;
+
+	Hhs [sigh11,sigh12,sigh21,sigh22] = [0,0,0,0];
+	sigh11[] = sol(0:Hhs.ndof-1); 
+
+	Hhu [uh1,uh2] = [0,0];
+	uh1[] = sol(Hhs.ndof:Hhs.ndof+Hhu.ndof-1);
+
+	Hhg gamh = 0;
+	gamh[] = sol(Hhs.ndof+Hhu.ndof:Hhs.ndof+Hhu.ndof+Hhg.ndof-1);
+
+	Hhp phih = 0;
+	phih[] = sol(Hhs.ndof+Hhu.ndof+Hhg.ndof+1:Hhs.ndof+Hhu.ndof+Hhg.ndof+Hhp.ndof);
+
+	Hhl lamh = 0;
+	lamh[] = sol(Hhs.ndof+Hhu.ndof+Hhg.ndof+Hhp.ndof+1:Hhs.ndof+Hhu.ndof+Hhg.ndof+Hhp.ndof+Hhl.ndof);
+
+	real meas = int2d(Th)(1.0);
+	real ch = int2d(Th)((uh1^2+uh2^2)/(2.*meas));
+	Hhg ph = -0.5*(sigh11 + uh1^2 + sigh22 + uh2^2 - 2.*ch);
+
+	/*------------------------------------------------
+		Remaining exact solutions to calculate
+	-------------------------------------------------*/
+
+	real cc = int2d(Th)((uex1^2+uex2^2)/(2.*meas));
+	func muex = exp(-cos(x*y)-1);
+	func sig11 = muex*duex1dx - pex - uex1^2 + cc;
+	func sig12 = 0.5*muex*(duex1dy+duex2dx) - uex1*uex2;
+	func sig21 = sig12;
+	func sig22 = muex*duex2dy - pex - uex2^2 + cc;
+
+	func divs1 = - fm1 - phiex*g1;
+	func divs2 = - fm2 - phiex*g2;
+
+	func gam = 0.5*(duex2dx-duex1dy);
+
+	/*---------------------------------------------
+		ERRORS AND RATES OF CONVERGENCE
+	----------------------------------------------*/
+
+	errorL2s = int2d(Th)((sig11-sigh11)^2+(sig12-sigh12)^2+(sig21-sigh21)^2+(sig22-sigh22)^2);
+	errorDivs = int2d(Th)((divs1-dx(sigh11)-dy(sigh12))^2 + (divs2-dx(sigh21)-dy(sigh22))^2);
+	errorHdivs[n] = sqrt(errorL2s + errorDivs);
+
+	errorL2u = int2d(Th)((uex1-uh1)^2+(uex2-uh2)^2);
+	errorGradu = int2d(Th)((duex1dx-dx(uh1))^2 + (duex1dy-dy(uh1))^2 
+								+ (duex2dx-dx(uh2))^2 + (duex2dy-dy(uh2))^2);
+	errorH1u[n] = sqrt(errorL2u + errorGradu);
+
+	errorL2g[n] = sqrt(int2d(Th)(2*(gam-gamh)^2));
+
+	errorL2phi = int2d(Th)((phiex-phih)^2);
+	errorGradphi = int2d(Th)((dphiexdx-dx(phih))^2 + (dphiexdy-dy(phih))^2);
+	errorH1phi[n] = sqrt(errorL2phi + errorGradphi);
+
+	errorL2lam[n] = sqrt( int1d(Th,4,1,3,2)((lamh + (k11*dphiexdx+k12*dphiexdy)*N.x 
+											+ (k12*dphiexdx + k22*dphiexdy)*N.y)^2 ) );
+
+	errorL2pre[n] = sqrt( int2d(Th)((pex-ph)^2));
+
+	if (n > 0){
+		rates[n] = log(errorHdivs[n-1]/errorHdivs[n])/log(hmesh[n-1]/hmesh[n]);
+		rateu[n] = log(errorH1u[n-1]/errorH1u[n])/log(hmesh[n-1]/hmesh[n]);
+		rateg[n] = log(errorL2g[n-1]/errorL2g[n])/log(hmesh[n-1]/hmesh[n]);
+		ratephi[n] = log(errorH1phi[n-1]/errorH1phi[n])/log(hmesh[n-1]/hmesh[n]);
+		ratelam[n] = log(errorL2lam[n-1]/errorL2lam[n])/log(hbord[n-1]/hbord[n]);
+		ratepre[n] = log(errorL2pre[n-1]/errorL2pre[n])/log(hmesh[n-1]/hmesh[n]);
+	}
+
+	/*-----------------------------------------
+		WRITING TO FILE
+	------------------------------------------*/
+	// Uncomment to export data to a .m file. Remember to uncomment lines 34-52 as well.
+	/*{
+	ofstream f(filename,append);
+	f.scientific << "data.DOF(" << n+1 << ") = " << DOF[n] << ";\n";
+	f.scientific << "data.hmesh(" << n+1 << ") = " << hmesh[n] << ";\n";
+	f.scientific << "data.hbord(" << n+1 << ") = " << hbord[n] << ";\n";
+	f.scientific << "data.errorHdivs(" << n+1 << ") = " << errorHdivs[n] << ";\n";
+	f.scientific << "data.errorH1u(" << n+1 << ") = " << errorH1u[n] << ";\n";
+	f.scientific << "data.errorL2g(" << n+1 << ") = " << errorL2g[n] << ";\n";
+	f.scientific << "data.errorH1phi(" << n+1 << ") = " << errorH1phi[n] << ";\n";
+	f.scientific << "data.errorL2lam(" << n+1 << ") = " << errorL2lam[n] << ";\n";
+	f.scientific << "data.errorL2pre(" << n+1 << ") = " << errorL2pre[n] << ";\n";
+	f.scientific << "data.rates(" << n+1 << ") = " << rates[n] << ";\n";
+	f.scientific << "data.rateu(" << n+1 << ") = " << rateu[n] << ";\n";
+	f.scientific << "data.rateg(" << n+1 << ") = " << rateg[n] << ";\n";
+	f.scientific << "data.ratephi(" << n+1 << ") = " << ratephi[n] << ";\n";
+	f.scientific << "data.ratelam(" << n+1 << ") = " << ratelam[n] << ";\n";
+	f.scientific << "data.ratepre(" << n+1 << ") = " << ratepre[n] << ";\n";
+	f.scientific << "data.iterations(" << n+1 << ") = " << iterations[n] << ";\n";
+	}*/
+
+	/*-----------------------------------------
+		EXPORTING GRAPHICS
+	------------------------------------------*/
+	// Uncomment to export graphics.
+	/*{
+	savevtk("example_01_numerical_"+n+".vtk",Th,[uh1,uh2,0],ph,phih,dataname="app_vel app_pre app_temp");
+	cout << "example_01_numerical_"+n+".vtk saved" << endl;
+	savevtk("example_01_exact_"+n+".vtk",Th,[uex1,uex2,0],pex,phiex,dataname="exact_vel exact_pre exact_temp");
+	cout << "example_01_exact_"+n+".vtk saved" << endl;
+	}*/
+
+}
+
+/*---------------------------------
+	RESULTS TO TERMINAL
+----------------------------------*/
+
+cout << "------------------ S U M M A R Y   O F   R E S U L T S ------------------" << endl;
+for (int n=0; n < nref; n++) cout << "(" << n << ") " << "DOF = " << DOF[n] << endl;
+for (int n=0; n < nref; n++) cout << "(" << n << ") " << "hmesh = " << hmesh[n] << endl;
+for (int n=0; n < nref; n++) cout << "(" << n << ") " << "errorHdivs = " << errorHdivs[n] << endl;
+for (int n=0; n < nref; n++) cout << "(" << n << ") " << "rates = " << rates[n] << endl;
+for (int n=0; n < nref; n++) cout << "(" << n << ") " << "errorH1u = " << errorH1u[n] << endl;
+for (int n=0; n < nref; n++) cout << "(" << n << ") " << "rateu = " << rateu[n] << endl;
+for (int n=0; n < nref; n++) cout << "(" << n << ") " << "errorL2g = " << errorL2g[n] << endl;
+for (int n=0; n < nref; n++) cout << "(" << n << ") " << "rateg = " << rateg[n] << endl;
+for (int n=0; n < nref; n++) cout << "(" << n << ") " << "errorH1phi = " << errorH1phi[n] << endl;
+for (int n=0; n < nref; n++) cout << "(" << n << ") " << "ratephi = " << ratephi[n] << endl;
+for (int n=0; n < nref; n++) cout << "(" << n << ") " << "errorL2lam = " << errorL2lam[n] << endl;
+for (int n=0; n < nref; n++) cout << "(" << n << ") " << "ratelam = " << ratelam[n] << endl;
+for (int n=0; n < nref; n++) cout << "(" << n << ") " << "errorL2pre = " << errorL2pre[n] << endl;
+for (int n=0; n < nref; n++) cout << "(" << n << ") " << "ratepre = " << ratepre[n] << endl;
