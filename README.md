@@ -51,5 +51,5 @@ To find out more about the theoretical aspects of this method, as well as compar
 A provably convergent (but more expensive) method has been devised in
 
 > J.A. Almonacid, G.N. Gatica, R. Oyarzua and R. Ruiz-Baier,
-> [*A new mixed finite element method for the n-dimensional Boussinesq problem with temperature-dependent viscosity*](ftp://ftp.ci2ma.udec.cl/pub/ci2ma/pre-publicaciones/2018/pp18-18.pdf)
+> [*A new mixed finite element method for the n-dimensional Boussinesq problem with temperature-dependent viscosity*](https://www.ci2ma.udec.cl/pdf/pre-publicaciones/2018/pp18-18.pdf)
 > Preprint 2018-18, Centro de Investigación en Ingeniería Matemática (CI2MA), UdeC, (2018).
