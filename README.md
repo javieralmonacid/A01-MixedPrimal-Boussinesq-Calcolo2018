@@ -18,8 +18,8 @@ space-dependent thermal conductivity.
 ```C++
 fespace Hhs(Th,[RT0,RT0]); 	// Pseudostress
 fespace Hhu(Th,[P1,P1]); 	// Velocity
-fespace Hhg(Th,P0);			// Vorticity
-fespace Hhp(Th,P1);			// Temperature
+fespace Hhg(Th,P0);	        // Vorticity
+fespace Hhp(Th,P1);		 // Temperature
 fespace Hhl(Sh,P0edge);		// Normal heat flux through the boundary
 ```
 * For a second order method, use
@@ -45,3 +45,11 @@ To find out more about the theoretical aspects of this method, as well as compar
 > J. A. Almonacid, G. N. Gatica and R. Oyarzua, 
 > [*A mixed-primal finite element method for the Boussinesq problem with temperature-dependent viscosity*](https://rdcu.be/32pk). 
 > Calcolo 55 (2018), no. 3, Art. 36, 42 pp.
+
+## Three-dimensional case
+
+A provably convergent (but more expensive) method has been devised in
+
+> J.A. Almonacid, G.N. Gatica, R. Oyarzua and R. Ruiz-Baier,
+> [*A new mixed finite element method for the n-dimensional Boussinesq problem with temperature-dependent viscosity*](ftp://ftp.ci2ma.udec.cl/pub/ci2ma/pre-publicaciones/2018/pp18-18.pdf)
+> Preprint 2018-18, Centro de Investigación en Ingeniería Matemática (CI2MA), UdeC, (2018).
