@@ -34,6 +34,10 @@ This requires to load "Element_Mixte" and "Element_PkEdge".
 
 * Higher order finite elements can also be used, however, the computational cost of this method might then become prohibitive.
 
+* Graphics can be exported in VTK format (Paraview).
+
+* Data such as DOFs, errors and rates of convergence can be exported in .m format (Matlab).
+
 ## Reference article
 
 To find out more about the theoretical aspects of this method, as well as comparisons between the codes in this repository and their expected results, read
